@@ -1,45 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import defaultPrompt from './defaultPrompt.md?raw'
+import { isImageFile } from './lib/isImageFile.js'
+import { readEntry } from './lib/folderTraversal.js'
 import './App.css'
 
 const DEFAULT_PROMPT = defaultPrompt
-
-const IMAGE_EXTENSIONS = /\.(jpe?g|png|gif|bmp|webp|tiff?|heic|heif|svg)$/i
-
-function isImageFile(file) {
-  if (!file) return false
-  if (file.type && file.type.startsWith('image/')) return true
-  return IMAGE_EXTENSIONS.test(file.name)
-}
-
-async function readEntry(entry, path = '') {
-  const results = []
-  if (entry.isFile) {
-    const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
-    if (path) {
-      try {
-        Object.defineProperty(file, 'relativePath', { value: path + file.name })
-      } catch {
-        // ignore read-only assignment failures
-      }
-    }
-    results.push(file)
-  } else if (entry.isDirectory) {
-    const reader = entry.createReader()
-    const readBatch = () =>
-      new Promise((resolve, reject) => reader.readEntries(resolve, reject))
-    let batch
-    do {
-      batch = await readBatch()
-      for (const child of batch) {
-        const nested = await readEntry(child, `${path}${entry.name}/`)
-        results.push(...nested)
-      }
-    } while (batch.length > 0)
-  }
-  return results
-}
 
 function FileDropArea({
   label,
