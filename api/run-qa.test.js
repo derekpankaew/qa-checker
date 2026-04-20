@@ -607,3 +607,160 @@ describe('Step 5: Pass B batch-overview call', () => {
     expect(elapsed).toBeLessThan(130)
   })
 })
+
+describe('Step 8: persistence of results.json + manifest.json', () => {
+  it('writes jobs/{jobId}/results.json to Blob with access: public', async () => {
+    mockCsvFetch('Name\nAlice\n')
+    createMock.mockImplementation(async ({ messages }) => {
+      const hasImage = messages[0].content.some((b) => b.type === 'image')
+      const text = hasImage
+        ? '{"findings":[],"extractedLabel":{"customerName":"Alice"}}'
+        : '{"findings":[]}'
+      return { content: [{ type: 'text', text }] }
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'JOB123',
+        prompt: '# test prompt',
+        imageUrls: ['https://blob/alice.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    await collectBody(res)
+    expect(putMock).toHaveBeenCalled()
+    const resultsCall = putMock.mock.calls.find(
+      (c) => c[0] === 'jobs/JOB123/results.json',
+    )
+    expect(resultsCall).toBeTruthy()
+    const opts = resultsCall[2] || {}
+    expect(opts.access).toBe('public')
+  })
+
+  it('results.json snapshots prompt, inputs, per-image, batch, missing, status, createdAt', async () => {
+    mockCsvFetch('Name\nAlice\nBob\n')
+    createMock.mockImplementation(async ({ messages }) => {
+      const hasImage = messages[0].content.some((b) => b.type === 'image')
+      const text = hasImage
+        ? '{"findings":[{"issue":"typo"}],"extractedLabel":{"customerName":"Alice"}}'
+        : '{"findings":[{"scope":"populating","issue":"Bob missing size"}]}'
+      return { content: [{ type: 'text', text }] }
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'JOB',
+        prompt: '# snapshot me',
+        imageUrls: ['https://blob/alice.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    await collectBody(res)
+    const resultsCall = putMock.mock.calls.find(
+      (c) => c[0] === 'jobs/JOB/results.json',
+    )
+    expect(resultsCall).toBeTruthy()
+    const snapshot = JSON.parse(resultsCall[1])
+    expect(snapshot.jobId).toBe('JOB')
+    expect(snapshot.prompt).toBe('# snapshot me')
+    expect(snapshot.imageUrls).toEqual(['https://blob/alice.jpg'])
+    expect(snapshot.csvUrls).toEqual(['https://blob/a.csv'])
+    expect(snapshot.createdAt).toBeTruthy()
+    expect(() => new Date(snapshot.createdAt)).not.toThrow()
+    expect(snapshot.statusCheck).toBeTruthy()
+    expect(snapshot.statusCheck.imagesReceived).toBe(1)
+    expect(snapshot.statusCheck.csvRowCount).toBe(2)
+    expect(snapshot.perImageResults).toHaveLength(1)
+    expect(snapshot.perImageResults[0].imageUrl).toBe(
+      'https://blob/alice.jpg',
+    )
+    expect(snapshot.batchFindings.length).toBeGreaterThan(0)
+    expect(snapshot.missingDesigns.map((m) => m.customerName)).toEqual(['Bob'])
+  })
+
+  it('also writes jobs/{jobId}/manifest.json with inputs + timestamp', async () => {
+    mockCsvFetch('')
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: '{"findings":[],"extractedLabel":{}}' }],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'JOBM',
+        prompt: '# p',
+        imageUrls: ['https://blob/x.jpg'],
+        csvUrls: ['https://blob/x.csv'],
+      }),
+    )
+    await collectBody(res)
+    const manifestCall = putMock.mock.calls.find(
+      (c) => c[0] === 'jobs/JOBM/manifest.json',
+    )
+    expect(manifestCall).toBeTruthy()
+    const manifest = JSON.parse(manifestCall[1])
+    expect(manifest.jobId).toBe('JOBM')
+    expect(manifest.imageUrls).toEqual(['https://blob/x.jpg'])
+    expect(manifest.csvUrls).toEqual(['https://blob/x.csv'])
+    expect(manifest.createdAt).toBeTruthy()
+  })
+
+  it('persists even when all images fail', async () => {
+    mockCsvFetch('')
+    createMock.mockRejectedValue(new Error('model down'))
+    const res = await handler(
+      mkReq({
+        jobId: 'FAILJ',
+        prompt: '# p',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: [],
+      }),
+    )
+    await collectBody(res)
+    const call = putMock.mock.calls.find(
+      (c) => c[0] === 'jobs/FAILJ/results.json',
+    )
+    expect(call).toBeTruthy()
+    const snapshot = JSON.parse(call[1])
+    expect(snapshot.perImageResults[0].error).toBeTruthy()
+  })
+
+  it('emits a persisted event after writes succeed', async () => {
+    mockCsvFetch('')
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: '{"findings":[],"extractedLabel":{}}' }],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'P',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: [],
+      }),
+    )
+    const body = await collectBody(res)
+    const persistedEvent = body.events.find((e) => e.kind === 'persisted')
+    expect(persistedEvent).toBeTruthy()
+    expect(persistedEvent.jobId).toBe('P')
+    expect(persistedEvent.resultsUrl).toBeTruthy()
+  })
+
+  it('does not abort the stream if persistence throws — surfaces persist_error', async () => {
+    mockCsvFetch('')
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: '{"findings":[],"extractedLabel":{}}' }],
+    })
+    putMock.mockImplementationOnce(async () => {
+      throw new Error('blob down')
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'ERR',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: [],
+      }),
+    )
+    const body = await collectBody(res)
+    const err = body.events.find((e) => e.kind === 'persist_error')
+    expect(err).toBeTruthy()
+    // done event still emitted — stream closes cleanly
+    expect(body.events[body.events.length - 1].kind).toBe('done')
+  })
+})

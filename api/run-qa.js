@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { put } from '@vercel/blob'
 import pLimit from 'p-limit'
 import { parseCsvNames, reconcileMissing } from './lib/reconcile.js'
 
@@ -158,13 +159,16 @@ export default async function handler(request) {
         controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
       }
 
-      // Status event first.
-      emit({
+      const createdAt = new Date().toISOString()
+      const statusCheck = {
         kind: 'status',
         jobId,
         imagesReceived: imageUrls.length,
         csvRowCount: csvRows.length,
-      })
+      }
+
+      // Status event first.
+      emit(statusCheck)
 
       // Fan out Pass A, capturing each result as it arrives.
       const limit = pLimit(PASS_A_CONCURRENCY)
@@ -179,11 +183,13 @@ export default async function handler(request) {
       )
 
       // Pass B in parallel.
+      let batchFindings = []
       const batchPromise = analyzeBatch(
         client,
         systemBlocks,
         imageUrls.length,
       ).then((findings) => {
+        batchFindings = findings
         emit({ kind: 'batch', findings })
         return findings
       })
@@ -196,6 +202,58 @@ export default async function handler(request) {
         .filter(Boolean)
       const missing = reconcileMissing(csvRows, extractedLabels)
       for (const m of missing) emit(m)
+
+      // Persist full snapshot for share links.
+      const snapshot = {
+        jobId,
+        prompt,
+        imageUrls,
+        csvUrls,
+        createdAt,
+        statusCheck: {
+          imagesReceived: statusCheck.imagesReceived,
+          csvRowCount: statusCheck.csvRowCount,
+        },
+        perImageResults,
+        batchFindings,
+        missingDesigns: missing,
+      }
+      try {
+        const resultsBlob = await put(
+          `jobs/${jobId}/results.json`,
+          JSON.stringify(snapshot),
+          {
+            access: 'public',
+            contentType: 'application/json',
+            allowOverwrite: true,
+          },
+        )
+        await put(
+          `jobs/${jobId}/manifest.json`,
+          JSON.stringify({
+            jobId,
+            imageUrls,
+            csvUrls,
+            createdAt,
+          }),
+          {
+            access: 'public',
+            contentType: 'application/json',
+            allowOverwrite: true,
+          },
+        )
+        emit({
+          kind: 'persisted',
+          jobId,
+          resultsUrl: resultsBlob.url,
+        })
+      } catch (err) {
+        emit({
+          kind: 'persist_error',
+          jobId,
+          error: err.message || String(err),
+        })
+      }
 
       emit({ kind: 'done' })
       controller.close()

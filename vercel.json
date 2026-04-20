@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "api/run-qa.js": { "maxDuration": 300 },
+    "api/cleanup-blobs.js": { "maxDuration": 300 }
+  },
+  "rewrites": [
+    { "source": "/api/results/:jobId", "destination": "/api/results?jobId=:jobId" },
+    { "source": "/run/:jobId", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cleanup-blobs", "schedule": "0 3 * * *" }
+  ]
+}
