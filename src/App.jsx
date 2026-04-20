@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import MDEditor from '@uiw/react-md-editor'
-import defaultPrompt from './defaultPrompt.md?raw'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import PromptEditor from './components/PromptEditor.jsx'
+import { getPrompt } from './lib/promptApi.js'
 import { isImageFile } from './lib/isImageFile.js'
 import { readEntry } from './lib/folderTraversal.js'
+import { uploadFiles } from './lib/upload.js'
+import { runQa } from './lib/runQa.js'
 import './App.css'
-
-const DEFAULT_PROMPT = defaultPrompt
 
 function FileDropArea({
   label,
@@ -124,46 +124,20 @@ function FileDropArea({
   )
 }
 
+function makeJobId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  return Math.random().toString(36).slice(2) + Date.now().toString(36)
+}
+
 export default function App() {
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
   const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(DEFAULT_PROMPT)
   const [csvFiles, setCsvFiles] = useState([])
   const [imageFiles, setImageFiles] = useState([])
-  const [showResults, setShowResults] = useState(false)
+  const [run, setRun] = useState(null)
   const [suggestion, setSuggestion] = useState('')
   const [suggestionHistory, setSuggestionHistory] = useState([])
 
-  const dummyIssues = [
-    'Typo detected on cuff links. The text exceeds the length of the Illustrator file.',
-    'The arrow is overlapping with the subhead text.',
-  ]
-
-  const dummyResults = useMemo(() => {
-    if (!showResults) return []
-    return imageFiles.slice(0, dummyIssues.length).map((file, i) => ({
-      name: file.relativePath || file.webkitRelativePath || file.name,
-      issue: dummyIssues[i],
-      url: URL.createObjectURL(file),
-    }))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showResults, imageFiles])
-
-  useEffect(() => {
-    return () => {
-      dummyResults.forEach((r) => URL.revokeObjectURL(r.url))
-    }
-  }, [dummyResults])
-
-  const openEditor = () => {
-    setDraft(prompt)
-    setEditing(true)
-  }
-
-  const savePrompt = () => {
-    setPrompt(draft)
-    setEditing(false)
-  }
+  const resetRun = () => setRun(null)
 
   const addFiles = (setter) => (incoming) => {
     setter((prev) => [...prev, ...incoming])
@@ -184,10 +158,69 @@ export default function App() {
     setSuggestion('')
   }
 
+  const beginQa = async () => {
+    if (imageFiles.length === 0) return
+    const jobId = makeJobId()
+    setRun({
+      jobId,
+      phase: 'uploading',
+      statusCheck: null,
+      perImage: [],
+      batchFindings: [],
+      missing: [],
+      shareUrl: null,
+      error: null,
+    })
+    try {
+      const [{ content: prompt }, imageUploads, csvUploads] = await Promise.all([
+        getPrompt(),
+        uploadFiles({ jobId, kind: 'images', files: imageFiles }),
+        uploadFiles({ jobId, kind: 'csvs', files: csvFiles }),
+      ])
+
+      const imageUrls = imageUploads.filter((u) => u.url).map((u) => u.url)
+      const csvUrls = csvUploads.filter((u) => u.url).map((u) => u.url)
+
+      setRun((r) => ({ ...r, phase: 'running' }))
+
+      await runQa({
+        jobId,
+        prompt,
+        imageUrls,
+        csvUrls,
+        onEvent: (evt) => {
+          setRun((r) => {
+            if (!r) return r
+            switch (evt.kind) {
+              case 'status':
+                return { ...r, statusCheck: evt }
+              case 'image':
+                return { ...r, perImage: [...r.perImage, evt] }
+              case 'batch':
+                return { ...r, batchFindings: evt.findings || [] }
+              case 'missing':
+                return { ...r, missing: [...r.missing, evt] }
+              case 'persisted':
+                return { ...r, shareUrl: `/run/${evt.jobId}` }
+              case 'persist_error':
+                return { ...r, error: `Persistence failed: ${evt.error}` }
+              case 'done':
+                return { ...r, phase: 'done' }
+              default:
+                return r
+            }
+          })
+        },
+      })
+    } catch (err) {
+      setRun((r) => ({ ...r, phase: 'error', error: err.message || String(err) }))
+    }
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <button className="prompt-button" onClick={openEditor}>
+        <button className="prompt-button" onClick={() => setEditing(true)}>
           Edit QA Prompt
         </button>
         <div className="sidebar__section">
@@ -235,26 +268,8 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {showResults ? (
-          <section className="main__section">
-            <div className="results__header">
-              <h2>QA Results</h2>
-              <button onClick={() => setShowResults(false)}>Back to Upload</button>
-            </div>
-            <ul className="results">
-              {dummyResults.map((r, i) => (
-                <li key={i} className="results__item">
-                  <div className="results__image">
-                    <img src={r.url} alt={r.name} />
-                  </div>
-                  <div className="results__body">
-                    <span className="results__file">{r.name}</span>
-                    <span className="results__issue">{r.issue}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
+        {run ? (
+          <RunView run={run} onBack={resetRun} />
         ) : (
           <section className="main__section">
             <h2>Upload Images</h2>
@@ -266,10 +281,7 @@ export default function App() {
               allowFolder
             />
             {imageFiles.length > 0 && (
-              <button
-                className="begin-qa"
-                onClick={() => setShowResults(true)}
-              >
+              <button className="begin-qa" onClick={beginQa}>
                 Begin QA ({imageFiles.length} image
                 {imageFiles.length === 1 ? '' : 's'})
               </button>
@@ -283,19 +295,102 @@ export default function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal__header">
               <h2>Edit QA Prompt</h2>
-              <div className="modal__actions">
-                <button onClick={() => setEditing(false)}>Cancel</button>
-                <button className="primary" onClick={savePrompt}>
-                  Save
-                </button>
-              </div>
             </div>
-            <div data-color-mode="light" className="modal__body">
-              <MDEditor value={draft} onChange={(v) => setDraft(v ?? '')} height={500} />
+            <div className="modal__body">
+              <PromptEditor onClose={() => setEditing(false)} />
             </div>
           </div>
         </div>
       )}
     </div>
+  )
+}
+
+function RunView({ run, onBack }) {
+  return (
+    <section className="main__section">
+      <div className="results__header">
+        <h2>QA Run</h2>
+        <button onClick={onBack}>Back to Upload</button>
+      </div>
+      <p className="run-phase">
+        {run.phase === 'uploading' && 'Uploading files…'}
+        {run.phase === 'running' && 'Running QA checks…'}
+        {run.phase === 'done' && 'Done.'}
+        {run.phase === 'error' && `Error: ${run.error}`}
+      </p>
+      {run.shareUrl && (
+        <p className="share-link">
+          Share: <a href={run.shareUrl}>{run.shareUrl}</a>
+        </p>
+      )}
+      {run.statusCheck && (
+        <p>
+          {run.statusCheck.imagesReceived} images · {run.statusCheck.csvRowCount}{' '}
+          CSV rows
+        </p>
+      )}
+
+      <h3>Per-image findings</h3>
+      {run.perImage.length === 0 ? (
+        <p>Waiting for results…</p>
+      ) : (
+        <ul className="results">
+          {run.perImage.map((r, i) => (
+            <li key={i} className="results__item">
+              <div className="results__image">
+                <img src={r.imageUrl} alt="" />
+              </div>
+              <div className="results__body">
+                {r.extractedLabel?.customerName && (
+                  <span className="results__file">
+                    {r.extractedLabel.customerName}
+                  </span>
+                )}
+                {r.error ? (
+                  <span className="results__issue">Error: {r.error}</span>
+                ) : r.findings?.length === 0 ? (
+                  <span className="results__ok">No issues found ✓</span>
+                ) : (
+                  <ul>
+                    {r.findings.map((f, j) => (
+                      <li key={j}>
+                        <strong>{f.severity}</strong> {f.issue}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h3>Batch-level findings</h3>
+      {run.batchFindings.length === 0 ? (
+        <p>{run.phase === 'done' ? 'None.' : 'Waiting…'}</p>
+      ) : (
+        <ul>
+          {run.batchFindings.map((f, i) => (
+            <li key={i}>
+              <strong>{f.severity}</strong> {f.issue}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h3>Missing designs</h3>
+      {run.missing.length === 0 ? (
+        <p>{run.phase === 'done' ? 'All rows matched.' : 'Waiting…'}</p>
+      ) : (
+        <ul>
+          {run.missing.map((m, i) => (
+            <li key={i}>
+              <strong>{m.customerName}</strong> (row {m.rowIndex}) — {m.issue}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
