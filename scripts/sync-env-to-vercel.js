@@ -261,7 +261,8 @@ async function main() {
   if (stats.failed > 0) process.exit(1)
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])
 if (isMain) {
   main().catch((err) => {
     console.error('ERROR:', err.message)
