@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { put } from '@vercel/blob'
 import pLimit from 'p-limit'
 import { parseCsvNames, reconcileMissing } from './_lib/reconcile.js'
+import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const MODEL = 'claude-opus-4-7'
 const MAX_TOKENS = 4096
@@ -142,7 +143,7 @@ async function analyzeBatch(client, systemBlocks, imageCount) {
   }
 }
 
-export default async function handler(request) {
+export async function handler(request) {
   const body = await request.json().catch(() => ({}))
   const { jobId, prompt, imageUrls = [], csvUrls = [] } = body
 
@@ -268,3 +269,5 @@ export default async function handler(request) {
     },
   })
 }
+
+export default toNodeHandler(handler)

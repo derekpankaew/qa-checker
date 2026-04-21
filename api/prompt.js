@@ -1,5 +1,6 @@
 import { put, head } from '@vercel/blob'
 import { createHash } from 'node:crypto'
+import { toNodeHandler } from './_lib/nodeAdapter.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -93,8 +94,10 @@ async function handlePut(request) {
   })
 }
 
-export default async function handler(request) {
+export async function handler(request) {
   if (request.method === 'GET') return handleGet()
   if (request.method === 'PUT') return handlePut(request)
   return new Response('Method Not Allowed', { status: 405 })
 }
+
+export default toNodeHandler(handler)

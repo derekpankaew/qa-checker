@@ -1,4 +1,5 @@
 import { handleUpload } from '@vercel/blob/client'
+import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const MAX_SIZE = 25 * 1024 * 1024 // 25 MB
 const ALLOWED_CONTENT_TYPES = [
@@ -24,7 +25,7 @@ function validatePathname(pathname) {
   }
 }
 
-export default async function handler(request) {
+export async function handler(request) {
   try {
     const body = await request.json()
     const response = await handleUpload({
@@ -53,3 +54,5 @@ export default async function handler(request) {
     })
   }
 }
+
+export default toNodeHandler(handler)

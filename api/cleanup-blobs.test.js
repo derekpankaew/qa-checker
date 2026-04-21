@@ -13,7 +13,7 @@ beforeEach(async () => {
   delMock.mockReset()
   vi.resetModules()
   process.env.CRON_SECRET = 'super-secret'
-  handler = (await import('./cleanup-blobs.js')).default
+  handler = (await import('./cleanup-blobs.js')).handler
 })
 
 function authed(token = 'super-secret') {

@@ -34,7 +34,7 @@ beforeEach(async () => {
   fetchMock.mockReset()
   vi.resetModules()
   process.env.ANTHROPIC_API_KEY = 'test-key'
-  handler = (await import('./run-qa.js')).default
+  handler = (await import('./run-qa.js')).handler
 })
 
 function mkReq(body) {

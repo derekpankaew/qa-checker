@@ -36,7 +36,7 @@ beforeEach(async () => {
   headMock.mockClear()
   fetchMock.mockReset()
   vi.resetModules()
-  handler = (await import('./prompt.js')).default
+  handler = (await import('./prompt.js')).handler
 })
 
 function req(method, body, headers = {}) {

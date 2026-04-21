@@ -28,7 +28,7 @@ beforeEach(async () => {
   headMock.mockClear()
   fetchMock.mockReset()
   vi.resetModules()
-  handler = (await import('./results.js')).default
+  handler = (await import('./results.js')).handler
 })
 
 function mkReq(url) {

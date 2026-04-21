@@ -1,4 +1,5 @@
 import { list, del } from '@vercel/blob'
+import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 const BATCH_SIZE = 100
@@ -9,7 +10,7 @@ function isAuthorized(request) {
   return header === expected
 }
 
-export default async function handler(request) {
+export async function handler(request) {
   if (request.method !== 'GET') {
     return new Response('Method Not Allowed', { status: 405 })
   }
@@ -46,3 +47,5 @@ export default async function handler(request) {
 
   return Response.json({ deleted: deletedCount })
 }
+
+export default toNodeHandler(handler)

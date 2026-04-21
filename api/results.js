@@ -1,4 +1,5 @@
 import { head } from '@vercel/blob'
+import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 function extractJobId(url) {
   const u = new URL(url)
@@ -14,7 +15,7 @@ function isSafeJobId(id) {
   return /^[A-Za-z0-9_-]+$/.test(id)
 }
 
-export default async function handler(request) {
+export async function handler(request) {
   const raw = extractJobId(request.url)
   if (!raw) {
     return Response.json({ error: 'jobId is required' }, { status: 400 })
@@ -43,3 +44,5 @@ export default async function handler(request) {
     return Response.json({ error: 'lookup failed' }, { status: 500 })
   }
 }
+
+export default toNodeHandler(handler)

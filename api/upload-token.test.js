@@ -9,7 +9,7 @@ let handler
 beforeEach(async () => {
   handleUploadMock.mockReset()
   vi.resetModules()
-  handler = (await import('./upload-token.js')).default
+  handler = (await import('./upload-token.js')).handler
 })
 
 function mkReq(body) {
