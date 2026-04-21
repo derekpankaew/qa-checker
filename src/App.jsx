@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PromptEditor from './components/PromptEditor.jsx'
 import { getPrompt } from './lib/promptApi.js'
 import { isImageFile } from './lib/isImageFile.js'
@@ -306,7 +306,33 @@ export default function App() {
   )
 }
 
+function isMinor(finding) {
+  return /minor/i.test(finding?.severity || '')
+}
+
 function RunView({ run, onBack }) {
+  const [showMinor, setShowMinor] = useState(false)
+
+  const filterFindings = (findings) =>
+    showMinor ? findings : (findings || []).filter((f) => !isMinor(f))
+
+  const visiblePerImage = useMemo(
+    () =>
+      run.perImage.map((r) => ({
+        ...r,
+        findings: filterFindings(r.findings),
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [run.perImage, showMinor],
+  )
+  const visibleBatch = filterFindings(run.batchFindings)
+
+  const hiddenCount =
+    run.perImage.reduce(
+      (n, r) => n + (r.findings || []).filter(isMinor).length,
+      0,
+    ) + (run.batchFindings || []).filter(isMinor).length
+
   return (
     <section className="main__section">
       <div className="results__header">
@@ -331,12 +357,24 @@ function RunView({ run, onBack }) {
         </p>
       )}
 
+      <label className="severity-toggle">
+        <input
+          type="checkbox"
+          checked={showMinor}
+          onChange={(e) => setShowMinor(e.target.checked)}
+        />
+        Show minor issues
+        {!showMinor && hiddenCount > 0 && (
+          <span className="severity-toggle__count"> ({hiddenCount} hidden)</span>
+        )}
+      </label>
+
       <h3>Per-image findings</h3>
-      {run.perImage.length === 0 ? (
+      {visiblePerImage.length === 0 ? (
         <p>Waiting for results…</p>
       ) : (
         <ul className="results">
-          {run.perImage.map((r, i) => (
+          {visiblePerImage.map((r, i) => (
             <li key={i} className="results__item">
               <div className="results__image">
                 <img src={r.imageUrl} alt="" />
@@ -367,11 +405,11 @@ function RunView({ run, onBack }) {
       )}
 
       <h3>Batch-level findings</h3>
-      {run.batchFindings.length === 0 ? (
+      {visibleBatch.length === 0 ? (
         <p>{run.phase === 'done' ? 'None.' : 'Waiting…'}</p>
       ) : (
         <ul>
-          {run.batchFindings.map((f, i) => (
+          {visibleBatch.map((f, i) => (
             <li key={i}>
               <strong>{f.severity}</strong> {f.issue}
             </li>

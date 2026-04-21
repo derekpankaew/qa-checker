@@ -1,44 +1,53 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { put } from '@vercel/blob'
-import pLimit from 'p-limit'
-import { parseCsvNames, reconcileMissing } from './_lib/reconcile.js'
+import { parseCsvNames } from './_lib/reconcile.js'
 import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const MODEL = 'claude-opus-4-7'
-const MAX_TOKENS = 4096
-const PASS_A_CONCURRENCY = 10
+const MAX_TOKENS = 8192
 
-const PER_IMAGE_INSTRUCTION = `Analyze this design against the QA SOP above. Find the matching order row in the CSV (match by customer name on the artboard label). Run the per-image checks in sections 4.1 through 4.16 of the SOP.
+function buildInstruction(imageCount) {
+  return `You are performing a full QA review of a design batch. You have:
 
-Return ONLY valid JSON in this shape, with no extra prose:
+- The QA SOP in the system prompt above.
+- The full order CSV in the system prompt above (every column, every row).
+- ${imageCount} design image(s) attached below, in the same order as the "imageIndex" numbering you should use in the response.
+
+Run ALL of these checks in a single pass:
+
+1. **Per-image checks (SOP sections 4.1–4.16)** for every image. Find the matching row in the CSV by customer name on the artboard label.
+2. **Batch-level checks** across the whole set:
+   - Section 4.17 — similar customer names across the batch (e.g. "Jeffrey Mathews" vs "Jeffrey Middows").
+   - Section 4.21 — populating errors (Full Customization must match populated columns).
+   - Opening status check — compare image count (${imageCount}) vs. CSV row count; flag mismatches.
+3. **Missing designs (section 4.19)** — any CSV row with no matching image in the batch. You can see every image, so this is a direct set-difference.
+
+Return ONLY valid JSON in this exact shape, with no prose before or after:
+
 {
-  "findings": [
-    { "issue": "...", "severity": "Critical" | "Minor", "location": "..." }
+  "statusCheck": {
+    "imagesReceived": ${imageCount},
+    "csvRowCount": <integer>,
+    "note": "<one-sentence summary, e.g. 'image count matches CSV'>"
+  },
+  "perImage": [
+    {
+      "imageIndex": <0-based>,
+      "customerName": "<name on the artboard, or empty string if unreadable>",
+      "findings": [
+        { "issue": "<description>", "severity": "Critical" | "Minor", "location": "<optional>" }
+      ]
+    }
   ],
-  "extractedLabel": {
-    "customerName": "...",
-    "size": "...",
-    "material": "...",
-    "mapType": "...",
-    "pinType": "...",
-    "dueDate": "..."
-  }
-}`
-
-function buildBatchInstruction(imageCount) {
-  return `You are running batch-level QA checks. You have the full order CSV in the system prompt above. Do NOT analyze individual designs — that is handled separately.
-
-Run these checks:
-(a) Status check: you received ${imageCount} design image(s). Compare against the CSV row count and call out any mismatches.
-(b) Section 4.17 — flag similar customer names across the batch (e.g., "Jeffrey Mathews" vs "Jeffrey Middows").
-(c) Section 4.21 — populating errors. Every detail in Full Customization must match the populated columns.
-
-Return ONLY valid JSON:
-{
-  "findings": [
-    { "scope": "status" | "similar_names" | "populating", "customerName": "...", "issue": "...", "severity": "Critical" | "Minor" }
+  "batchFindings": [
+    { "scope": "status" | "similar_names" | "populating", "customerName": "<optional>", "issue": "<description>", "severity": "Critical" | "Minor" }
+  ],
+  "missingDesigns": [
+    { "customerName": "<name from CSV>", "rowIndex": <int>, "issue": "Order in spreadsheet but no matching design found" }
   ]
-}`
+}
+
+If a section has no findings, return it as an empty array. Every image MUST have a corresponding entry in perImage (even if findings is empty).`
 }
 
 async function downloadCsvs(urls) {
@@ -50,29 +59,22 @@ async function downloadCsvs(urls) {
     texts.push(text)
   }
   if (texts.length === 1) return texts[0]
-  return texts
-    .map((t, i) => `--- CSV ${i + 1} ---\n${t}`)
-    .join('\n\n')
+  return texts.map((t, i) => `--- CSV ${i + 1} ---\n${t}`).join('\n\n')
 }
 
-function buildSharedPrefix(prompt, csvText) {
-  const systemBlocks = [
-    { type: 'text', text: prompt },
-  ]
+function buildSystemBlocks(prompt, csvText) {
+  const blocks = [{ type: 'text', text: prompt }]
   if (csvText) {
-    systemBlocks.push({
+    blocks.push({
       type: 'text',
       text: `\n\n# Order Spreadsheet (CSV, full raw data)\n\n${csvText}`,
     })
   }
-  // Mark the last block with cache_control so the whole prefix (prompt + CSV)
-  // is cached. Anthropic caches everything up to and including the marked block.
-  systemBlocks[systemBlocks.length - 1].cache_control = { type: 'ephemeral' }
-  return systemBlocks
+  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
+  return blocks
 }
 
 function extractJson(text) {
-  // Try direct parse first, then fall back to finding a {...} block.
   try {
     return JSON.parse(text)
   } catch {
@@ -95,60 +97,12 @@ function responseText(response) {
     .join('')
 }
 
-async function analyzeImage(client, systemBlocks, imageUrl) {
-  try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: systemBlocks,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'url', url: imageUrl } },
-            { type: 'text', text: PER_IMAGE_INSTRUCTION },
-          ],
-        },
-      ],
-    })
-    const parsed = extractJson(responseText(res))
-    return {
-      kind: 'image',
-      imageUrl,
-      findings: Array.isArray(parsed.findings) ? parsed.findings : [],
-      extractedLabel: parsed.extractedLabel || {},
-    }
-  } catch (err) {
-    return { kind: 'image', imageUrl, error: err.message || String(err) }
-  }
-}
-
-async function analyzeBatch(client, systemBlocks, imageCount) {
-  try {
-    const res = await client.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: systemBlocks,
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'text', text: buildBatchInstruction(imageCount) }],
-        },
-      ],
-    })
-    const parsed = extractJson(responseText(res))
-    return Array.isArray(parsed.findings) ? parsed.findings : []
-  } catch (err) {
-    return [{ scope: 'error', issue: err.message || String(err), severity: 'Minor' }]
-  }
-}
-
 export async function handler(request) {
   const body = await request.json().catch(() => ({}))
   const { jobId, prompt, imageUrls = [], csvUrls = [] } = body
 
   const csvText = await downloadCsvs(csvUrls)
-  const systemBlocks = buildSharedPrefix(prompt, csvText)
+  const systemBlocks = buildSystemBlocks(prompt, csvText)
   const csvRows = parseCsvNames(csvText)
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -162,62 +116,93 @@ export async function handler(request) {
 
       const createdAt = new Date().toISOString()
       const statusCheck = {
-        kind: 'status',
-        jobId,
         imagesReceived: imageUrls.length,
         csvRowCount: csvRows.length,
       }
+      emit({ kind: 'status', jobId, ...statusCheck })
 
-      // Status event first.
-      emit(statusCheck)
+      // One call, all images, the full CSV + prompt cached in the system prefix.
+      const userContent = [
+        ...imageUrls.map((url) => ({
+          type: 'image',
+          source: { type: 'url', url },
+        })),
+        { type: 'text', text: buildInstruction(imageUrls.length) },
+      ]
 
-      // Fan out Pass A, capturing each result as it arrives.
-      const limit = pLimit(PASS_A_CONCURRENCY)
-      const perImageResults = []
-      const perImagePromises = imageUrls.map((url) =>
-        limit(async () => {
-          const result = await analyzeImage(client, systemBlocks, url)
-          perImageResults.push(result)
-          emit(result)
-          return result
-        }),
-      )
-
-      // Pass B in parallel.
+      let perImageResults = []
       let batchFindings = []
-      const batchPromise = analyzeBatch(
-        client,
-        systemBlocks,
-        imageUrls.length,
-      ).then((findings) => {
-        batchFindings = findings
-        emit({ kind: 'batch', findings })
-        return findings
-      })
+      let missingDesigns = []
 
-      await Promise.all([...perImagePromises, batchPromise])
+      try {
+        const res = await client.messages.create({
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: systemBlocks,
+          messages: [{ role: 'user', content: userContent }],
+        })
+        let parsed
+        try {
+          parsed = extractJson(responseText(res))
+        } catch (err) {
+          emit({
+            kind: 'parse_error',
+            error: err.message || 'parse_failed',
+            raw: responseText(res).slice(0, 2000),
+          })
+          parsed = {}
+        }
 
-      // Reconciliation after all images processed.
-      const extractedLabels = perImageResults
-        .map((r) => r.extractedLabel)
-        .filter(Boolean)
-      const missing = reconcileMissing(csvRows, extractedLabels)
-      for (const m of missing) emit(m)
+        // Map perImage entries back to their imageUrl so the client can render.
+        const perImage = Array.isArray(parsed.perImage) ? parsed.perImage : []
+        perImageResults = imageUrls.map((url, idx) => {
+          const match =
+            perImage.find((p) => p.imageIndex === idx) ||
+            perImage[idx] ||
+            null
+          if (!match) {
+            return {
+              kind: 'image',
+              imageUrl: url,
+              findings: [],
+              extractedLabel: {},
+            }
+          }
+          return {
+            kind: 'image',
+            imageUrl: url,
+            findings: Array.isArray(match.findings) ? match.findings : [],
+            extractedLabel: {
+              customerName: match.customerName || '',
+            },
+          }
+        })
+        for (const r of perImageResults) emit(r)
 
-      // Persist full snapshot for share links.
+        batchFindings = Array.isArray(parsed.batchFindings)
+          ? parsed.batchFindings
+          : []
+        emit({ kind: 'batch', findings: batchFindings })
+
+        missingDesigns = Array.isArray(parsed.missingDesigns)
+          ? parsed.missingDesigns.map((m) => ({ kind: 'missing', ...m }))
+          : []
+        for (const m of missingDesigns) emit(m)
+      } catch (err) {
+        emit({ kind: 'error', error: err.message || String(err) })
+      }
+
+      // Persist snapshot for share links.
       const snapshot = {
         jobId,
         prompt,
         imageUrls,
         csvUrls,
         createdAt,
-        statusCheck: {
-          imagesReceived: statusCheck.imagesReceived,
-          csvRowCount: statusCheck.csvRowCount,
-        },
+        statusCheck,
         perImageResults,
         batchFindings,
-        missingDesigns: missing,
+        missingDesigns,
       }
       try {
         const resultsBlob = await put(
@@ -231,23 +216,14 @@ export async function handler(request) {
         )
         await put(
           `jobs/${jobId}/manifest.json`,
-          JSON.stringify({
-            jobId,
-            imageUrls,
-            csvUrls,
-            createdAt,
-          }),
+          JSON.stringify({ jobId, imageUrls, csvUrls, createdAt }),
           {
             access: 'public',
             contentType: 'application/json',
             allowOverwrite: true,
           },
         )
-        emit({
-          kind: 'persisted',
-          jobId,
-          resultsUrl: resultsBlob.url,
-        })
+        emit({ kind: 'persisted', jobId, resultsUrl: resultsBlob.url })
       } catch (err) {
         emit({
           kind: 'persist_error',

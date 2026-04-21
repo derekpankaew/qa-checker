@@ -1,5 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
+
+function isMinor(finding) {
+  return /minor/i.test(finding?.severity || '')
+}
 
 export default function Run() {
   const { jobId } = useParams()
@@ -37,6 +41,30 @@ export default function Run() {
     return <div className="run-page">Error loading run.</div>
 
   const snapshot = state.data
+  return <RunPageContent snapshot={snapshot} />
+}
+
+function RunPageContent({ snapshot }) {
+  const [showMinor, setShowMinor] = useState(false)
+  const filter = (findings) =>
+    showMinor ? findings : (findings || []).filter((f) => !isMinor(f))
+
+  const perImage = useMemo(
+    () =>
+      snapshot.perImageResults.map((r) => ({
+        ...r,
+        findings: filter(r.findings),
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snapshot.perImageResults, showMinor],
+  )
+  const batch = filter(snapshot.batchFindings)
+  const hiddenCount =
+    snapshot.perImageResults.reduce(
+      (n, r) => n + (r.findings || []).filter(isMinor).length,
+      0,
+    ) + (snapshot.batchFindings || []).filter(isMinor).length
+
   return (
     <div className="run-page">
       <header className="run-page__header">
@@ -46,12 +74,26 @@ export default function Run() {
           {snapshot.statusCheck.csvRowCount} CSV rows · created{' '}
           {new Date(snapshot.createdAt).toLocaleString()}
         </p>
+        <label className="severity-toggle">
+          <input
+            type="checkbox"
+            checked={showMinor}
+            onChange={(e) => setShowMinor(e.target.checked)}
+          />
+          Show minor issues
+          {!showMinor && hiddenCount > 0 && (
+            <span className="severity-toggle__count">
+              {' '}
+              ({hiddenCount} hidden)
+            </span>
+          )}
+        </label>
       </header>
 
       <section className="run-page__section">
         <h2>Per-image findings</h2>
         <ul className="run-page__list">
-          {snapshot.perImageResults.map((r, i) => (
+          {perImage.map((r, i) => (
             <li key={i} className="run-page__item">
               <div className="run-page__image">
                 <img src={r.imageUrl} alt="" />
@@ -86,11 +128,11 @@ export default function Run() {
 
       <section className="run-page__section">
         <h2>Batch-level findings</h2>
-        {snapshot.batchFindings.length === 0 ? (
+        {batch.length === 0 ? (
           <p>No batch-level issues.</p>
         ) : (
           <ul>
-            {snapshot.batchFindings.map((f, i) => (
+            {batch.map((f, i) => (
               <li key={i}>
                 <span className={`severity severity--${f.severity}`}>
                   {f.severity}
