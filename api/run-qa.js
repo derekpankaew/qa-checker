@@ -4,10 +4,11 @@ import { parseCsvNames } from './_lib/reconcile.js'
 import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const MODEL = 'claude-opus-4-7'
-// Opus 4.7 supports up to 32k output tokens. Needed for batches of 30+
-// images — at ~150-300 output tokens per image's findings, 8k was hitting
-// the cap and truncating JSON mid-stream, producing empty results.
-const MAX_TOKENS = 32000
+// Opus 4.7 supports up to 128k output tokens on the sync/streaming API
+// (300k via the batch beta header, which we don't use). For large batches
+// of 50+ images with detailed findings, we need more than the 8k default.
+// Context window is 1M tokens total — plenty of headroom on input.
+const MAX_TOKENS = 128000
 
 function buildInstruction(imageCount) {
   return `You are performing a full QA review of a design batch. You have:
