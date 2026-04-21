@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { put } from '@vercel/blob'
 import pLimit from 'p-limit'
-import { parseCsvNames, reconcileMissing } from './lib/reconcile.js'
+import { parseCsvNames, reconcileMissing } from './_lib/reconcile.js'
 
 const MODEL = 'claude-opus-4-7'
 const MAX_TOKENS = 4096

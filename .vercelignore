@@ -1,0 +1,6 @@
+**/*.test.js
+**/*.test.jsx
+**/*.test.ts
+**/*.test.tsx
+src/test/
+scripts/
