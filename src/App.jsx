@@ -292,10 +292,10 @@ export default function App() {
 
       {editing && (
         <div className="modal-backdrop" onClick={() => setEditing(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal__header">
-              <h2>Edit QA Prompt</h2>
-            </div>
+          <div
+            className="modal modal--tall"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="modal__body">
               <PromptEditor onClose={() => setEditing(false)} />
             </div>
