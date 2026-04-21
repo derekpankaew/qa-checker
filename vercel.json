@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/run-qa.js": { "maxDuration": 300 },
+    "api/run-qa.js": { "maxDuration": 800 },
     "api/cleanup-blobs.js": { "maxDuration": 300 }
   },
   "rewrites": [
