@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Local env + Vercel CLI state (sync via scripts/sync-env-to-vercel.js)
+.env
+.env.*
+!.env.example
+.vercel
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

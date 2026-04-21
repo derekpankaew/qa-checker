@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "sync:env": "node scripts/sync-env-to-vercel.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
