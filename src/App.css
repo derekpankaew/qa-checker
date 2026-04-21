@@ -487,3 +487,33 @@ body {
   color: #6b7280;
   font-size: 12px;
 }
+
+.run-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 12px 14px;
+  border-radius: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.run-error details {
+  margin-top: 8px;
+}
+
+.run-error pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  background: white;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: #450a0a;
+  max-height: 360px;
+  overflow-y: auto;
+}

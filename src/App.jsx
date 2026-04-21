@@ -170,6 +170,7 @@ export default function App() {
       missing: [],
       shareUrl: null,
       error: null,
+      runError: null,
     })
     try {
       const [{ content: prompt }, imageUploads, csvUploads] = await Promise.all([
@@ -204,6 +205,23 @@ export default function App() {
                 return { ...r, shareUrl: `/run/${evt.jobId}` }
               case 'persist_error':
                 return { ...r, error: `Persistence failed: ${evt.error}` }
+              case 'error':
+                return {
+                  ...r,
+                  runError: {
+                    kind: evt.subkind || 'call_failed',
+                    message: evt.message || evt.error,
+                  },
+                }
+              case 'parse_error':
+                return {
+                  ...r,
+                  runError: {
+                    kind: 'parse_failed',
+                    message: evt.error,
+                    raw: evt.raw,
+                  },
+                }
               case 'done':
                 return { ...r, phase: 'done' }
               default:
@@ -355,6 +373,18 @@ function RunView({ run, onBack }) {
           {run.statusCheck.imagesReceived} images · {run.statusCheck.csvRowCount}{' '}
           CSV rows
         </p>
+      )}
+      {run.runError && (
+        <div className="run-error">
+          <strong>Run error ({run.runError.kind}):</strong>{' '}
+          {run.runError.message}
+          {run.runError.raw && (
+            <details>
+              <summary>Raw model output (first 4 KB)</summary>
+              <pre>{run.runError.raw}</pre>
+            </details>
+          )}
+        </div>
       )}
 
       <label className="severity-toggle">

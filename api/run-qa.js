@@ -4,7 +4,10 @@ import { parseCsvNames } from './_lib/reconcile.js'
 import { toNodeHandler } from './_lib/nodeAdapter.js'
 
 const MODEL = 'claude-opus-4-7'
-const MAX_TOKENS = 8192
+// Opus 4.7 supports up to 32k output tokens. Needed for batches of 30+
+// images — at ~150-300 output tokens per image's findings, 8k was hitting
+// the cap and truncating JSON mid-stream, producing empty results.
+const MAX_TOKENS = 32000
 
 function buildInstruction(imageCount) {
   return `You are performing a full QA review of a design batch. You have:
@@ -133,6 +136,7 @@ export async function handler(request) {
       let perImageResults = []
       let batchFindings = []
       let missingDesigns = []
+      let runError = null
 
       try {
         const res = await client.messages.create({
@@ -141,14 +145,31 @@ export async function handler(request) {
           system: systemBlocks,
           messages: [{ role: 'user', content: userContent }],
         })
+        if (res.stop_reason === 'max_tokens') {
+          runError = {
+            kind: 'truncated',
+            message: `Response hit max_tokens (${MAX_TOKENS}). JSON was cut off — findings below may be incomplete or missing entirely. Consider splitting the batch.`,
+          }
+          emit({
+            kind: 'error',
+            subkind: 'truncated',
+            message: runError.message,
+          })
+        }
         let parsed
         try {
           parsed = extractJson(responseText(res))
         } catch (err) {
+          const rawSnippet = responseText(res).slice(0, 4000)
+          runError = runError || {
+            kind: 'parse_failed',
+            message: err.message || 'parse_failed',
+            raw: rawSnippet,
+          }
           emit({
             kind: 'parse_error',
             error: err.message || 'parse_failed',
-            raw: responseText(res).slice(0, 2000),
+            raw: rawSnippet,
           })
           parsed = {}
         }
@@ -189,7 +210,8 @@ export async function handler(request) {
           : []
         for (const m of missingDesigns) emit(m)
       } catch (err) {
-        emit({ kind: 'error', error: err.message || String(err) })
+        runError = { kind: 'call_failed', message: err.message || String(err) }
+        emit({ kind: 'error', error: runError.message })
       }
 
       // Persist snapshot for share links.
@@ -203,6 +225,7 @@ export async function handler(request) {
         perImageResults,
         batchFindings,
         missingDesigns,
+        runError,
       }
       try {
         const resultsBlob = await put(

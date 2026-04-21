@@ -74,6 +74,18 @@ function RunPageContent({ snapshot }) {
           {snapshot.statusCheck.csvRowCount} CSV rows · created{' '}
           {new Date(snapshot.createdAt).toLocaleString()}
         </p>
+        {snapshot.runError && (
+          <div className="run-error">
+            <strong>Run error ({snapshot.runError.kind}):</strong>{' '}
+            {snapshot.runError.message}
+            {snapshot.runError.raw && (
+              <details>
+                <summary>Raw model output (first 4 KB)</summary>
+                <pre>{snapshot.runError.raw}</pre>
+              </details>
+            )}
+          </div>
+        )}
         <label className="severity-toggle">
           <input
             type="checkbox"

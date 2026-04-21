@@ -449,6 +449,56 @@ describe('Persistence', () => {
     expect(manifestCall).toBeTruthy()
   })
 
+  it('emits an error event and persists runError when stop_reason is max_tokens', async () => {
+    mockCsvFetch(CSV_A)
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify(sampleResponse()) }],
+      stop_reason: 'max_tokens',
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'TRUNC',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    const err = body.events.find((e) => e.kind === 'error')
+    expect(err).toBeTruthy()
+    expect(err.kind).toBe('error')
+    expect(err.subkind).toBe('truncated')
+    expect(err.message).toMatch(/max_tokens|truncat/i)
+
+    const snap = JSON.parse(
+      putMock.mock.calls.find((c) => c[0] === 'jobs/TRUNC/results.json')[1],
+    )
+    expect(snap.runError).toBeTruthy()
+    expect(snap.runError.kind).toBe('truncated')
+  })
+
+  it('persists runError with raw snippet when JSON parse fails', async () => {
+    mockCsvFetch('')
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'not json at all' }],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'PARSEERR',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: [],
+      }),
+    )
+    await collectBody(res)
+    const snap = JSON.parse(
+      putMock.mock.calls.find((c) => c[0] === 'jobs/PARSEERR/results.json')[1],
+    )
+    expect(snap.runError).toBeTruthy()
+    expect(snap.runError.kind).toBe('parse_failed')
+    expect(snap.runError.raw).toContain('not json at all')
+  })
+
   it('emits persist_error (but still "done") when put() throws', async () => {
     mockCsvFetch('')
     mockAnthropicResponse(sampleResponse())
