@@ -443,6 +443,7 @@ body {
   justify-content: center;
   aspect-ratio: 1 / 1;
   position: relative;
+  cursor: zoom-in;
 }
 
 .results__image img {

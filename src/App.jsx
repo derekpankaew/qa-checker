@@ -445,7 +445,19 @@ function RunView({ run, onBack }) {
         <ul className="results">
           {visiblePerImage.map((r, i) => (
             <li key={i} className="results__item">
-              <div className="results__image">
+              <div
+                className="results__image"
+                role="button"
+                tabIndex={0}
+                aria-label="Enlarge image"
+                onClick={() => setLightboxSrc(r.imageUrl)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setLightboxSrc(r.imageUrl)
+                  }
+                }}
+              >
                 <img src={r.imageUrl} alt="" />
                 <MagnifierButton onClick={() => setLightboxSrc(r.imageUrl)} />
               </div>
