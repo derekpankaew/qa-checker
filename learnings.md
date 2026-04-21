@@ -419,3 +419,36 @@ Flagged in the previous section. GET `/api/prompt` on a fresh deploy (before any
 #### Bundle size
 
 Still ~1.38 MB. Code-split PromptEditor to trim ~800 KB off the initial load. Low-priority until someone complains about TTI.
+
+## 2026-04-21 — Batch vs per-image findings misrouting
+
+Problem surfaced after the first real 36-image production run. Many findings that should belong to specific images (anniversary-year mismatches, unconfirmed customer names, "three Smiths in one batch") were showing up in the `Batch-level findings` section instead of on the per-image card where the user can actually act on them. Meanwhile, some missing-design items were also leaking into batch findings (Claude hedging with "may have been previously completed").
+
+#### Root cause
+
+The prompt defined three exclusive buckets (`perImage.findings`, `batchFindings`, `missingDesigns`) but:
+
+1. The `batchFindings.scope` enum was fixed at `"status" | "similar_names" | "populating"` — so any finding outside those three categories (e.g. anniversary-math mismatches) got crammed into `batchFindings` as a catch-all because the model had no clear alternative.
+2. The schema had a strict **0-or-1 image** relationship. Real cross-order findings (three Smiths, two Jasons) affect N images at once. The only place to put them was batch-level, which hid them from per-image review.
+3. The prompt never said "each finding goes in exactly one place" → double-emission for ambiguous findings.
+4. The prompt never said "missing CSV rows always go in `missingDesigns`, never `batchFindings`" → hedged items drifted into batch.
+
+#### Options evaluated
+
+**Option A — Tighten the prompt only.** Rewrite `buildInstruction` with sharp routing rules: per-order findings always go in `perImage`, batch-level ONLY for findings with no single owner, missing designs always in `missingDesigns`, no duplication. Zero code change. Fast. Downside: prompts are leaky under long outputs — model will still misroute occasionally.
+
+**Option B — Add `imageIndexes: [int]` to batch findings, route server-side.** Schema change: every `batchFinding` carries an `imageIndexes` array. Server post-processes: empty array → truly global (stays in batch), ≥1 → fan out to each referenced image's `perImage.findings`, drop from batch. Makes routing deterministic; model's only job is labeling which images it's talking about. ~15 lines of server code + 1 schema field.
+
+**Option C — Flatten the schema to one `findings[]` list.** Kill the three-bucket split at the model layer. One flat list with `{scope, imageIndexes, rowIndex, customerNames, issue, severity}`; server fans out into three UI buckets. Cleanest long-term design — no classification pressure on the model, just enumeration. But touches prompt, parser, snapshot shape, UI reducers, all tests. Bigger lift.
+
+**Option D — Second Claude call for routing.** Take the parsed response and send `batchFindings` back to Claude: "for each, is it global or per-image?" Rejected — adds latency, cost, and another prompt failure surface; doesn't fix the root cause (prompt ambiguity).
+
+**Option E — Require `scope: "image"|"batch"|"missing"` on every finding.** Less invasive version of C: keep the three output buckets but also require each finding to self-declare its intended scope; server moves mislabeled items. Middle ground.
+
+#### Chosen: A + B
+
+A is free and fixes the easy errors (missing designs posing as batch findings; single-order anniversary math in batch). B makes the hard case (three-Smiths cross-order) deterministic — the model labels `imageIndexes`, the server handles routing, the same finding can legitimately appear on multiple per-image cards.
+
+Behavioral decision: **cross-order findings appear ONLY on per-image cards** (no duplicate batch-level summary). Rationale: each image card should be self-contained when reviewing image-by-image; a summary at batch level would just add redundant reading.
+
+C is the "right" end state but not worth doing today — A+B captures most of the benefit. Options C/D/E are parked here in case the prompt-only part of A starts drifting under real usage.

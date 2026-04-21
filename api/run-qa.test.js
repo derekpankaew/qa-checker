@@ -377,6 +377,204 @@ describe('Response parsing', () => {
   })
 })
 
+describe('Batch-finding routing via imageIndexes', () => {
+  it('routes a batchFinding with one imageIndex onto that image and drops it from batch', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 2, csvRowCount: 2 },
+      perImage: [
+        { imageIndex: 0, customerName: 'Alice', findings: [] },
+        { imageIndex: 1, customerName: 'Bob', findings: [] },
+      ],
+      batchFindings: [
+        {
+          scope: 'global',
+          imageIndexes: [1],
+          issue: 'Anniversary-year math mismatch for Bob',
+          severity: 'Critical',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'J',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg', 'https://blob/b.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    expect(body.batchFindings).toEqual([])
+    expect(body.perImageResults[0].findings).toEqual([])
+    expect(body.perImageResults[1].findings).toHaveLength(1)
+    expect(body.perImageResults[1].findings[0].issue).toMatch(
+      /Anniversary-year/,
+    )
+    expect(body.perImageResults[1].findings[0].severity).toBe('Critical')
+  })
+
+  it('fans out a batchFinding with multiple imageIndexes to each listed image', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 3, csvRowCount: 3 },
+      perImage: [
+        { imageIndex: 0, customerName: 'Dustin Smith', findings: [] },
+        { imageIndex: 1, customerName: 'Stacey Smith', findings: [] },
+        { imageIndex: 2, customerName: 'Sydney Smith', findings: [] },
+      ],
+      batchFindings: [
+        {
+          scope: 'global',
+          imageIndexes: [0, 1, 2],
+          issue: 'Three Smiths — add first names to labels',
+          severity: 'Critical',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'J',
+        prompt: 'x',
+        imageUrls: [
+          'https://blob/a.jpg',
+          'https://blob/b.jpg',
+          'https://blob/c.jpg',
+        ],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    expect(body.batchFindings).toEqual([])
+    for (const r of body.perImageResults) {
+      expect(r.findings).toHaveLength(1)
+      expect(r.findings[0].issue).toMatch(/Three Smiths/)
+    }
+  })
+
+  it('keeps batchFindings with empty imageIndexes at the batch level', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 1, csvRowCount: 5 },
+      perImage: [{ imageIndex: 0, customerName: 'Alice', findings: [] }],
+      batchFindings: [
+        {
+          scope: 'status',
+          imageIndexes: [],
+          issue: 'Image count (1) does not match CSV row count (5)',
+          severity: 'Critical',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'J',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    expect(body.batchFindings).toHaveLength(1)
+    expect(body.batchFindings[0].issue).toMatch(/does not match/)
+    expect(body.perImageResults[0].findings).toEqual([])
+  })
+
+  it('treats a batchFinding with missing imageIndexes field as global (stays in batch)', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 1, csvRowCount: 1 },
+      perImage: [{ imageIndex: 0, customerName: 'Alice', findings: [] }],
+      batchFindings: [
+        {
+          scope: 'populating',
+          issue: 'No imageIndexes supplied — treat as global',
+          severity: 'Minor',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'J',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    expect(body.batchFindings).toHaveLength(1)
+    expect(body.perImageResults[0].findings).toEqual([])
+  })
+
+  it('drops out-of-range imageIndexes safely (treats them as global)', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 1, csvRowCount: 1 },
+      perImage: [{ imageIndex: 0, customerName: 'Alice', findings: [] }],
+      batchFindings: [
+        {
+          scope: 'global',
+          imageIndexes: [99, -1, 'whoops'],
+          issue: 'Invalid indexes should not crash',
+          severity: 'Minor',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'J',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    const body = await collectBody(res)
+    expect(body.batchFindings).toHaveLength(1)
+    expect(body.perImageResults[0].findings).toEqual([])
+  })
+
+  it('persists the routed results to the snapshot (per-image has routed findings; batch does not)', async () => {
+    mockCsvFetch(CSV_A)
+    mockAnthropicResponse({
+      statusCheck: { imagesReceived: 2, csvRowCount: 2 },
+      perImage: [
+        { imageIndex: 0, customerName: 'Alice', findings: [] },
+        { imageIndex: 1, customerName: 'Bob', findings: [] },
+      ],
+      batchFindings: [
+        {
+          scope: 'global',
+          imageIndexes: [0],
+          issue: 'Anniversary mismatch for Alice',
+          severity: 'Critical',
+        },
+      ],
+      missingDesigns: [],
+    })
+    const res = await handler(
+      mkReq({
+        jobId: 'ROUTE1',
+        prompt: 'x',
+        imageUrls: ['https://blob/a.jpg', 'https://blob/b.jpg'],
+        csvUrls: ['https://blob/a.csv'],
+      }),
+    )
+    await collectBody(res)
+    const snap = JSON.parse(
+      putMock.mock.calls.find((c) => c[0] === 'jobs/ROUTE1/results.json')[1],
+    )
+    expect(snap.batchFindings).toEqual([])
+    expect(snap.perImageResults[0].findings).toHaveLength(1)
+    expect(snap.perImageResults[0].findings[0].issue).toMatch(
+      /Anniversary mismatch for Alice/,
+    )
+  })
+})
+
 describe('Streaming event order', () => {
   it('emits status first, then per-image, batch, missing, persisted, done — in that order', async () => {
     mockCsvFetch(CSV_A)

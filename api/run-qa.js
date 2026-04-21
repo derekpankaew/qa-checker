@@ -17,14 +17,36 @@ function buildInstruction(imageCount) {
 - The full order CSV in the system prompt above (every column, every row).
 - ${imageCount} design image(s) attached below, in the same order as the "imageIndex" numbering you should use in the response.
 
-Run ALL of these checks in a single pass:
+## STRICT ROUTING RULES — every finding lives in EXACTLY ONE place, never duplicated
 
-1. **Per-image checks (SOP sections 4.1–4.16)** for every image. Find the matching row in the CSV by customer name on the artboard label.
-2. **Batch-level checks** across the whole set:
-   - Section 4.17 — similar customer names across the batch (e.g. "Jeffrey Mathews" vs "Jeffrey Middows").
-   - Section 4.21 — populating errors (Full Customization must match populated columns).
-   - Opening status check — compare image count (${imageCount}) vs. CSV row count; flag mismatches.
-3. **Missing designs (section 4.19)** — any CSV row with no matching image in the batch. You can see every image, so this is a direct set-difference.
+**perImage[i].findings** — any finding tied to one specific image/order. This includes:
+  - All SOP per-artboard checks (4.1–4.16)
+  - Anniversary-year vs. material math for that order
+  - Missing/unconfirmed customer names on that artboard
+  - Any finding whose remediation targets a specific artboard
+
+**batchFindings** — ONLY findings with NO single-order owner (truly global).
+  - Example: "CSV has no Material column" — structural problem with no single owner.
+  - Status check (image-count vs CSV-row-count mismatch) is the canonical batch-level finding.
+  - The \`imageIndexes\` array on each batch finding MUST list every affected image (empty = truly global).
+  - If a finding has 1+ entries in \`imageIndexes\`, the server will fan it out to each image's per-image findings automatically — so prefer emitting directly in \`perImage\` when you already know the owner.
+
+**missingDesigns** — CSV rows with no matching image. Use this bucket for any "order in spreadsheet but no image found" item, even when you're uncertain whether it was completed earlier. Never put missing-design items in batchFindings.
+
+### Cross-order collisions (section 4.17, duplicate surnames, etc.)
+
+When multiple orders share a surname or are otherwise confusable:
+  - Emit ONE finding on EACH affected image's \`perImage.findings\`, naming the other customers in the issue text (e.g. "Smith surname shared with Stacey Smith and Sydney Smith — add first name in bold to label").
+  - Do NOT also emit a summary in \`batchFindings\`. Each image's card should be self-contained.
+
+## Checks to run (single pass)
+
+1. Per-image checks (4.1–4.16) for every image → \`perImage.findings\`.
+2. Cross-order checks (4.17 similar names, 4.21 populating errors) → attach to each affected image's \`perImage.findings\`.
+3. Status check — compare image count (${imageCount}) vs. CSV row count → \`batchFindings\` with empty \`imageIndexes\`.
+4. Missing designs (4.19) → \`missingDesigns\`.
+
+## Response shape
 
 Return ONLY valid JSON in this exact shape, with no prose before or after:
 
@@ -44,14 +66,20 @@ Return ONLY valid JSON in this exact shape, with no prose before or after:
     }
   ],
   "batchFindings": [
-    { "scope": "status" | "similar_names" | "populating", "customerName": "<optional>", "issue": "<description>", "severity": "Critical" | "Minor" }
+    {
+      "scope": "status" | "global",
+      "imageIndexes": [<int>, ...],
+      "customerNames": ["<optional>"],
+      "issue": "<description>",
+      "severity": "Critical" | "Minor"
+    }
   ],
   "missingDesigns": [
     { "customerName": "<name from CSV>", "rowIndex": <int>, "issue": "Order in spreadsheet but no matching design found" }
   ]
 }
 
-If a section has no findings, return it as an empty array. Every image MUST have a corresponding entry in perImage (even if findings is empty).`
+If a section has no findings, return it as an empty array. Every image MUST have a corresponding entry in perImage (even if findings is empty). \`imageIndexes\` on a batchFinding is required — use [] for truly global findings.`
 }
 
 async function downloadCsvs(urls) {
@@ -204,11 +232,34 @@ export async function handler(request) {
             },
           }
         })
-        for (const r of perImageResults) emit(r)
 
-        batchFindings = Array.isArray(parsed.batchFindings)
+        // Route any batchFinding with imageIndexes into the per-image buckets.
+        // Empty/missing imageIndexes → truly global, stays in batchFindings.
+        const rawBatch = Array.isArray(parsed.batchFindings)
           ? parsed.batchFindings
           : []
+        const globalBatch = []
+        for (const f of rawBatch) {
+          const idxs = Array.isArray(f.imageIndexes) ? f.imageIndexes : []
+          const valid = idxs.filter(
+            (i) =>
+              Number.isInteger(i) && i >= 0 && i < perImageResults.length,
+          )
+          if (valid.length === 0) {
+            globalBatch.push(f)
+            continue
+          }
+          for (const i of valid) {
+            perImageResults[i].findings.push({
+              issue: f.issue,
+              severity: f.severity,
+              scope: f.scope,
+            })
+          }
+        }
+        batchFindings = globalBatch
+
+        for (const r of perImageResults) emit(r)
         emit({ kind: 'batch', findings: batchFindings })
 
         missingDesigns = Array.isArray(parsed.missingDesigns)
