@@ -12,6 +12,7 @@ export default function PromptEditor({ onClose }) {
   const [etag, setEtag] = useState(null)
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState(null)
+  const [lastLoadedContent, setLastLoadedContent] = useState('')
 
   const visualRootRef = useRef(null)
   const crepeRef = useRef(null)
@@ -21,13 +22,16 @@ export default function PromptEditor({ onClose }) {
     getPrompt()
       .then((res) => {
         if (cancelled) return
-        setContent(res.content || '')
+        const c = res.content || ''
+        setContent(c)
+        setLastLoadedContent(c)
         setEtag(res.etag || null)
         setLoaded(true)
       })
       .catch(() => {
         if (cancelled) return
         setContent(defaultPrompt)
+        setLastLoadedContent(defaultPrompt)
         setEtag('default')
         setLoaded(true)
       })
@@ -67,20 +71,62 @@ export default function PromptEditor({ onClose }) {
     return content
   }
 
+  // Option B — on window focus, silently refresh the etag so the next save
+  // doesn't 409 just because the server-side etag drifted. If the server's
+  // content has genuinely changed AND the user has an unsaved draft, surface
+  // an info banner instead of silently overwriting anything.
+  useEffect(() => {
+    if (!loaded) return
+    const onFocus = async () => {
+      if (saving) return
+      try {
+        const res = await getPrompt()
+        const draft = currentMarkdown()
+        const hasDraft = draft !== lastLoadedContent
+        if (res.content === lastLoadedContent) {
+          // Server content unchanged; just refresh the etag.
+          setEtag(res.etag)
+        } else if (!hasDraft) {
+          // User hasn't edited locally; safe to swap to server version.
+          setContent(res.content)
+          setLastLoadedContent(res.content)
+          setEtag(res.etag)
+        } else {
+          // User has a draft AND server changed. Warn, but preserve draft.
+          setStatus({
+            kind: 'info',
+            message:
+              'Server has a newer version. Save to overwrite, or close and reopen to load it.',
+          })
+          setEtag(res.etag)
+        }
+      } catch {
+        /* network blip — ignore */
+      }
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, saving, lastLoadedContent, mode])
+
   const toggleMode = () => {
     const latest = currentMarkdown()
     setContent(latest)
     setMode((m) => (m === 'visual' ? 'source' : 'visual'))
   }
 
-  const handleSave = async () => {
+  const performSave = async (ifMatchOverride) => {
     setSaving(true)
     setStatus(null)
     const payload = currentMarkdown()
     setContent(payload)
     try {
-      const res = await savePrompt({ content: payload, ifMatch: etag })
+      const res = await savePrompt({
+        content: payload,
+        ifMatch: ifMatchOverride ?? etag,
+      })
       setEtag(res.etag)
+      setLastLoadedContent(payload)
       setStatus({ kind: 'saved' })
     } catch (err) {
       if (err.code === 'conflict') {
@@ -94,6 +140,23 @@ export default function PromptEditor({ onClose }) {
       }
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSave = () => performSave()
+
+  // Option A — on conflict, fetch the latest etag from the server and retry
+  // the save with the user's draft content. The overwritten version is still
+  // archived in prompts/history/, so nothing is permanently lost.
+  const handleOverwrite = async () => {
+    try {
+      const fresh = await getPrompt()
+      await performSave(fresh.etag)
+    } catch (err) {
+      setStatus({
+        kind: 'error',
+        message: err.message || 'Failed to refresh etag',
+      })
     }
   }
 
@@ -130,6 +193,21 @@ export default function PromptEditor({ onClose }) {
             <span className="prompt-editor__status">Saved ✓</span>
           )}
           {status?.kind === 'conflict' && (
+            <>
+              <span className="prompt-editor__status prompt-editor__status--warn">
+                {status.message}
+              </span>
+              <button
+                type="button"
+                onClick={handleOverwrite}
+                disabled={saving}
+                className="prompt-editor__btn"
+              >
+                Overwrite anyway
+              </button>
+            </>
+          )}
+          {status?.kind === 'info' && (
             <span className="prompt-editor__status prompt-editor__status--warn">
               {status.message}
             </span>

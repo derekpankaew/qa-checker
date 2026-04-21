@@ -203,6 +203,98 @@ describe('PromptEditor', () => {
     expect(visual).toHaveValue('# edited in source')
   })
 
+  it('on conflict, shows an "Overwrite anyway" button', async () => {
+    getPromptMock.mockResolvedValue({ content: 'x', etag: 'e1', updatedAt: 't' })
+    savePromptMock.mockRejectedValueOnce(
+      Object.assign(new Error('conflict'), { code: 'conflict' }),
+    )
+    render(<PromptEditor />)
+    await waitFor(() => screen.getByTestId('milkdown-editor'))
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /overwrite anyway/i }),
+      ).toBeInTheDocument(),
+    )
+  })
+
+  it('"Overwrite anyway" re-fetches the current etag and re-saves', async () => {
+    getPromptMock
+      .mockResolvedValueOnce({ content: 'x', etag: 'e1', updatedAt: 't' })
+      .mockResolvedValueOnce({ content: 'something else', etag: 'e-fresh', updatedAt: 't2' })
+    savePromptMock
+      .mockRejectedValueOnce(Object.assign(new Error('conflict'), { code: 'conflict' }))
+      .mockResolvedValueOnce({ etag: 'e-after', updatedAt: 't3' })
+
+    render(<PromptEditor />)
+    await waitFor(() => screen.getByTestId('milkdown-editor'))
+    fireEvent.change(screen.getByTestId('milkdown-editor'), {
+      target: { value: '# my draft' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    const forceBtn = await screen.findByRole('button', {
+      name: /overwrite anyway/i,
+    })
+    fireEvent.click(forceBtn)
+
+    await waitFor(() => expect(savePromptMock).toHaveBeenCalledTimes(2))
+    // Second call used the fresh etag + user's draft content.
+    expect(savePromptMock).toHaveBeenLastCalledWith({
+      content: '# my draft',
+      ifMatch: 'e-fresh',
+    })
+    await waitFor(() => expect(screen.getByText(/saved/i)).toBeInTheDocument())
+  })
+
+  it('on window focus, re-fetches getPrompt silently (etag refresh)', async () => {
+    getPromptMock.mockResolvedValue({ content: 'x', etag: 'e1', updatedAt: 't' })
+    render(<PromptEditor />)
+    await waitFor(() => screen.getByTestId('milkdown-editor'))
+    expect(getPromptMock).toHaveBeenCalledTimes(1)
+
+    // Server now has same content but a new etag (our curl-drift case).
+    getPromptMock.mockResolvedValueOnce({
+      content: 'x',
+      etag: 'e2',
+      updatedAt: 't-later',
+    })
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() => expect(getPromptMock).toHaveBeenCalledTimes(2))
+    // No user-facing status change on a silent refresh.
+    expect(screen.queryByText(/server has/i)).not.toBeInTheDocument()
+  })
+
+  it('on focus, if server content differs and user has a draft, shows an info banner', async () => {
+    getPromptMock.mockResolvedValueOnce({
+      content: 'original',
+      etag: 'e1',
+      updatedAt: 't',
+    })
+    render(<PromptEditor />)
+    await waitFor(() => screen.getByTestId('milkdown-editor'))
+
+    // User edits their local draft.
+    fireEvent.change(screen.getByTestId('milkdown-editor'), {
+      target: { value: 'my draft' },
+    })
+
+    // Server content changes.
+    getPromptMock.mockResolvedValueOnce({
+      content: 'other person edited',
+      etag: 'e-new',
+      updatedAt: 't-later',
+    })
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() =>
+      expect(screen.getByText(/server has a newer version/i)).toBeInTheDocument(),
+    )
+    // Draft is preserved.
+    expect(screen.getByTestId('milkdown-editor')).toHaveValue('my draft')
+  })
+
   it('Save from source view persists the raw text', async () => {
     getPromptMock.mockResolvedValue({ content: 'x', etag: 'e', updatedAt: 't' })
     savePromptMock.mockResolvedValue({ etag: 'e2', updatedAt: 't2' })
