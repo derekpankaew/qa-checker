@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { fireEvent } from '@testing-library/react'
 import Run from './Run.jsx'
 
 const fetchMock = vi.fn()
@@ -106,7 +107,7 @@ describe('/run/:jobId share page', () => {
     })
   })
 
-  it('renders "No issues found" for an image with empty findings', async () => {
+  it('hides clean images by default; reveals them via "Show clean images"', async () => {
     const clean = {
       ...SAMPLE_SNAPSHOT,
       perImageResults: [
@@ -122,9 +123,18 @@ describe('/run/:jobId share page', () => {
     }
     fetchMock.mockResolvedValue(jsonResponse(clean))
     renderAt('JOBC')
-    await waitFor(() => {
-      expect(screen.getByText(/no issues/i)).toBeInTheDocument()
-    })
+
+    // Default: clean image is hidden, "No issues found" is not rendered.
+    await waitFor(() =>
+      expect(screen.getByText(/show clean images/i)).toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/no issues/i)).not.toBeInTheDocument()
+
+    // Toggle the checkbox on → clean image appears.
+    fireEvent.click(screen.getByLabelText(/show clean images/i))
+    await waitFor(() =>
+      expect(screen.getByText(/no issues/i)).toBeInTheDocument(),
+    )
   })
 
   it('renders the prompt snapshot alongside results', async () => {

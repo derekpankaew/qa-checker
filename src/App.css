@@ -488,6 +488,17 @@ body {
   font-size: 12px;
 }
 
+.filter-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 12px 0 16px;
+}
+
+.filter-toggles .severity-toggle {
+  margin: 0;
+}
+
 .run-error {
   background: #fef2f2;
   border: 1px solid #fecaca;

@@ -339,11 +339,12 @@ function isMinor(finding) {
 
 function RunView({ run, onBack }) {
   const [showMinor, setShowMinor] = useState(false)
+  const [showClean, setShowClean] = useState(false)
 
   const filterFindings = (findings) =>
     showMinor ? findings : (findings || []).filter((f) => !isMinor(f))
 
-  const visiblePerImage = useMemo(
+  const allFiltered = useMemo(
     () =>
       run.perImage.map((r) => ({
         ...r,
@@ -352,13 +353,20 @@ function RunView({ run, onBack }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [run.perImage, showMinor],
   )
+  const visiblePerImage = showClean
+    ? allFiltered
+    : allFiltered.filter((r) => r.error || (r.findings && r.findings.length > 0))
+
   const visibleBatch = filterFindings(run.batchFindings)
 
-  const hiddenCount =
+  const hiddenMinorCount =
     run.perImage.reduce(
       (n, r) => n + (r.findings || []).filter(isMinor).length,
       0,
     ) + (run.batchFindings || []).filter(isMinor).length
+  const hiddenCleanCount = allFiltered.filter(
+    (r) => !r.error && (!r.findings || r.findings.length === 0),
+  ).length
 
   return (
     <section className="main__section">
@@ -397,17 +405,36 @@ function RunView({ run, onBack }) {
         </div>
       )}
 
-      <label className="severity-toggle">
-        <input
-          type="checkbox"
-          checked={showMinor}
-          onChange={(e) => setShowMinor(e.target.checked)}
-        />
-        Show minor issues
-        {!showMinor && hiddenCount > 0 && (
-          <span className="severity-toggle__count"> ({hiddenCount} hidden)</span>
-        )}
-      </label>
+      <div className="filter-toggles">
+        <label className="severity-toggle">
+          <input
+            type="checkbox"
+            checked={showMinor}
+            onChange={(e) => setShowMinor(e.target.checked)}
+          />
+          Show minor issues
+          {!showMinor && hiddenMinorCount > 0 && (
+            <span className="severity-toggle__count">
+              {' '}
+              ({hiddenMinorCount} hidden)
+            </span>
+          )}
+        </label>
+        <label className="severity-toggle">
+          <input
+            type="checkbox"
+            checked={showClean}
+            onChange={(e) => setShowClean(e.target.checked)}
+          />
+          Show clean images
+          {!showClean && hiddenCleanCount > 0 && (
+            <span className="severity-toggle__count">
+              {' '}
+              ({hiddenCleanCount} hidden)
+            </span>
+          )}
+        </label>
+      </div>
 
       <h3>Per-image findings</h3>
       {visiblePerImage.length === 0 ? (
