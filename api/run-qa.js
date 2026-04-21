@@ -140,12 +140,17 @@ export async function handler(request) {
       let runError = null
 
       try {
-        const res = await client.messages.create({
+        // Use streaming — Anthropic's SDK requires it for any call whose
+        // max_tokens puts potential duration over 10 minutes. We don't
+        // process the stream incrementally; we just await the assembled
+        // final message, which has the same shape as messages.create().
+        const stream = client.messages.stream({
           model: MODEL,
           max_tokens: MAX_TOKENS,
           system: systemBlocks,
           messages: [{ role: 'user', content: userContent }],
         })
+        const res = await stream.finalMessage()
         if (res.stop_reason === 'max_tokens') {
           runError = {
             kind: 'truncated',

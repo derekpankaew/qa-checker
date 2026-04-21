@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-/* Mock the Anthropic SDK */
+/* Mock the Anthropic SDK. Tests configure `createMock`; we route both
+   messages.create() AND messages.stream().finalMessage() through it so
+   existing setup keeps working regardless of which API the handler uses. */
 const createMock = vi.fn()
 vi.mock('@anthropic-ai/sdk', () => {
   return {
     default: class MockAnthropic {
       constructor() {
-        this.messages = { create: createMock }
+        this.messages = {
+          create: createMock,
+          stream: (...args) => ({
+            finalMessage: () => createMock(...args),
+          }),
+        }
       }
     },
   }
