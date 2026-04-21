@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import ImageLightbox, { MagnifierButton } from '../components/ImageLightbox.jsx'
 
 function isMinor(finding) {
   return /minor/i.test(finding?.severity || '')
@@ -34,35 +35,43 @@ export default function Run() {
     }
   }, [jobId])
 
-  if (state.status === 'loading') return <div className="run-page">Loading run…</div>
+  if (state.status === 'loading')
+    return <div className="main"><section className="main__section">Loading run…</section></div>
   if (state.status === 'not_found')
-    return <div className="run-page">Run not found — no results for "{jobId}".</div>
+    return (
+      <div className="main">
+        <section className="main__section">
+          Run not found — no results for "{jobId}".
+        </section>
+      </div>
+    )
   if (state.status === 'error')
-    return <div className="run-page">Error loading run.</div>
+    return <div className="main"><section className="main__section">Error loading run.</section></div>
 
-  const snapshot = state.data
-  return <RunPageContent snapshot={snapshot} />
+  return <RunPageContent snapshot={state.data} />
 }
 
 function RunPageContent({ snapshot }) {
   const [showMinor, setShowMinor] = useState(false)
   const [showClean, setShowClean] = useState(false)
-  const filter = (findings) =>
+  const [lightboxSrc, setLightboxSrc] = useState(null)
+
+  const filterFindings = (findings) =>
     showMinor ? findings : (findings || []).filter((f) => !isMinor(f))
 
   const allFiltered = useMemo(
     () =>
       snapshot.perImageResults.map((r) => ({
         ...r,
-        findings: filter(r.findings),
+        findings: filterFindings(r.findings),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [snapshot.perImageResults, showMinor],
   )
-  const perImage = showClean
+  const visiblePerImage = showClean
     ? allFiltered
     : allFiltered.filter((r) => r.error || (r.findings && r.findings.length > 0))
-  const batch = filter(snapshot.batchFindings)
+  const visibleBatch = filterFindings(snapshot.batchFindings)
   const hiddenMinorCount =
     snapshot.perImageResults.reduce(
       (n, r) => n + (r.findings || []).filter(isMinor).length,
@@ -73,10 +82,12 @@ function RunPageContent({ snapshot }) {
   ).length
 
   return (
-    <div className="run-page">
-      <header className="run-page__header">
-        <h1>QA Run {snapshot.jobId}</h1>
-        <p className="run-page__meta">
+    <div className="main">
+      <section className="main__section">
+        <div className="results__header">
+          <h2>QA Run {snapshot.jobId}</h2>
+        </div>
+        <p className="run-phase">
           {snapshot.statusCheck.imagesReceived} images ·{' '}
           {snapshot.statusCheck.csvRowCount} CSV rows · created{' '}
           {new Date(snapshot.createdAt).toLocaleString()}
@@ -93,6 +104,7 @@ function RunPageContent({ snapshot }) {
             )}
           </div>
         )}
+
         <div className="filter-toggles">
           <label className="severity-toggle">
             <input
@@ -123,64 +135,57 @@ function RunPageContent({ snapshot }) {
             )}
           </label>
         </div>
-      </header>
 
-      <section className="run-page__section">
-        <h2>Per-image findings</h2>
-        <ul className="run-page__list">
-          {perImage.map((r, i) => (
-            <li key={i} className="run-page__item">
-              <div className="run-page__image">
-                <img src={r.imageUrl} alt="" />
-              </div>
-              <div className="run-page__body">
-                {r.extractedLabel?.customerName && (
-                  <div className="run-page__customer">
-                    {r.extractedLabel.customerName}
-                  </div>
-                )}
-                {r.error ? (
-                  <div className="run-page__error">Error: {r.error}</div>
-                ) : r.findings.length === 0 ? (
-                  <div className="run-page__ok">No issues found ✓</div>
-                ) : (
-                  <ul>
-                    {r.findings.map((f, j) => (
-                      <li key={j}>
-                        <span className={`severity severity--${f.severity}`}>
-                          {f.severity}
-                        </span>{' '}
-                        {f.issue}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="run-page__section">
-        <h2>Batch-level findings</h2>
-        {batch.length === 0 ? (
-          <p>No batch-level issues.</p>
+        <h3>Per-image findings</h3>
+        {visiblePerImage.length === 0 ? (
+          <p>No per-image findings.</p>
         ) : (
-          <ul>
-            {batch.map((f, i) => (
-              <li key={i}>
-                <span className={`severity severity--${f.severity}`}>
-                  {f.severity}
-                </span>{' '}
-                {f.issue}
+          <ul className="results">
+            {visiblePerImage.map((r, i) => (
+              <li key={i} className="results__item">
+                <div className="results__image">
+                  <img src={r.imageUrl} alt="" />
+                  <MagnifierButton onClick={() => setLightboxSrc(r.imageUrl)} />
+                </div>
+                <div className="results__body">
+                  {r.extractedLabel?.customerName && (
+                    <span className="results__file">
+                      {r.extractedLabel.customerName}
+                    </span>
+                  )}
+                  {r.error ? (
+                    <span className="results__issue">Error: {r.error}</span>
+                  ) : r.findings?.length === 0 ? (
+                    <span className="results__ok">No issues found ✓</span>
+                  ) : (
+                    <ul>
+                      {r.findings.map((f, j) => (
+                        <li key={j}>
+                          <strong>{f.severity}</strong> {f.issue}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
         )}
-      </section>
 
-      <section className="run-page__section">
-        <h2>Missing designs</h2>
+        <h3>Batch-level findings</h3>
+        {visibleBatch.length === 0 ? (
+          <p>No batch-level issues.</p>
+        ) : (
+          <ul>
+            {visibleBatch.map((f, i) => (
+              <li key={i}>
+                <strong>{f.severity}</strong> {f.issue}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <h3>Missing designs</h3>
         {snapshot.missingDesigns.length === 0 ? (
           <p>All CSV rows matched to a design.</p>
         ) : (
@@ -193,11 +198,11 @@ function RunPageContent({ snapshot }) {
             ))}
           </ul>
         )}
-      </section>
 
-      <section className="run-page__section">
-        <h2>Prompt snapshot</h2>
-        <pre className="run-page__prompt">{snapshot.prompt}</pre>
+        <h3>Prompt snapshot</h3>
+        <pre className="prompt-snapshot">{snapshot.prompt}</pre>
+
+        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
       </section>
     </div>
   )

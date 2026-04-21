@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PromptEditor from './components/PromptEditor.jsx'
+import ImageLightbox, { MagnifierButton } from './components/ImageLightbox.jsx'
 import { getPrompt } from './lib/promptApi.js'
 import { isImageFile } from './lib/isImageFile.js'
 import { readEntry } from './lib/folderTraversal.js'
@@ -340,6 +341,7 @@ function isMinor(finding) {
 function RunView({ run, onBack }) {
   const [showMinor, setShowMinor] = useState(false)
   const [showClean, setShowClean] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState(null)
 
   const filterFindings = (findings) =>
     showMinor ? findings : (findings || []).filter((f) => !isMinor(f))
@@ -445,6 +447,7 @@ function RunView({ run, onBack }) {
             <li key={i} className="results__item">
               <div className="results__image">
                 <img src={r.imageUrl} alt="" />
+                <MagnifierButton onClick={() => setLightboxSrc(r.imageUrl)} />
               </div>
               <div className="results__body">
                 {r.extractedLabel?.customerName && (
@@ -496,6 +499,8 @@ function RunView({ run, onBack }) {
           ))}
         </ul>
       )}
+
+      <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
     </section>
   )
 }

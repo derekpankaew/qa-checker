@@ -254,3 +254,168 @@ Use this section going forward as new things get learned. Append as a new `##` s
 - "Turns out X doesn't work the way we thought" items
 
 Things that don't belong here: commit messages (git log has those), TODO items (use an issue tracker), task-specific debug notes (those are ephemeral).
+
+## 2026-04-21 — Post-MVP iteration session
+
+Ten commits after the initial learnings write. Broadly: editor overhaul, a single-call pipeline rewrite, three silent-failure fixes stacked on top of each other, and two UX filters. Tests now **147 across 17 files, all green**.
+
+Commits (chronological):
+
+- `39aa708` Swap `@uiw/react-md-editor` for Milkdown Crepe (WYSIWYG)
+- `414f914` Add conflict recovery UX: Overwrite anyway + focus-based etag refresh
+- `2bbe0f5` Max out vertical space in the Edit Prompt modal
+- `1359f3d` Single Anthropic call for the whole batch + "Show minor issues" toggle
+- `ba1f77b` Fix silent failure mode on large batches: raise max_tokens + surface errors
+- `f446253` Bump MAX_TOKENS to 128000 (Opus 4.7's actual sync-API ceiling)
+- `7a63c28` Switch run-qa to `messages.stream()` — SDK rejects non-stream long calls
+- `6de39b0` Bump run-qa `maxDuration` to 800s (Fluid Compute ceiling)
+- `2c3511f` Client-side image resize to 2000px for Anthropic's many-image limit
+- `72685d6` Add "Show clean images" toggle — hide passes by default
+
+#### Milkdown Crepe replaced `@uiw/react-md-editor`
+
+The MD editor was a split-pane (source + preview) that felt like editing Markdown source with a preview tab. User wanted a visual-first WYSIWYG — edit the rendered output directly, Notion-style.
+
+Surveyed the landscape: TipTap (solid, but doesn't store markdown natively — converts on load/save, lossy on edge cases), Lexical (Meta's framework, heavy and not markdown-native), ProseMirror directly (too low-level), Milkdown (built on ProseMirror, markdown-first by design, Crepe preset is the drop-in Notion-alike). Picked Milkdown Crepe.
+
+Integration in `src/components/PromptEditor.jsx`:
+- `mode: 'visual' | 'source'` toolbar toggle. Visual mode mounts Crepe into a div; source mode renders a plain textarea.
+- `currentMarkdown()` pulls from whichever is active (Crepe's `editor.action(getMarkdown())` or the textarea value).
+- `performSave(ifMatchOverride)` factors out the PUT so both Save and Overwrite-anyway paths share it.
+- Clean switch between modes without losing content: read markdown from the source you're leaving, pass as initial content to the mount you're entering.
+
+Gotcha: Milkdown's editor instance is async to create. Tests mock the whole `@milkdown/*` ecosystem with a plain textarea stub (`data-testid="prompt-editor"`), so PromptEditor tests stay focused on state + API behavior.
+
+Bundle impact: ~1.38 MB after Milkdown (up from ~1.3 MB before). Still under a single chunk; still flagged by Vite. Code-splitting PromptEditor would reclaim most of this on initial load. Not fixed yet.
+
+#### Optimistic concurrency — both recovery paths
+
+`api/prompt.js` has been etag-gated from the start (If-Match → 409 on mismatch). The missing piece was client UX. Implemented two options together:
+
+**Option A — "Overwrite anyway" on 409.** When Save gets a conflict response, PromptEditor shows a red banner with two buttons: `Save again (keep my changes)` and `Discard my changes`. Save-again re-fetches the current etag, then PUTs with that etag + local content. Discard resets to the server's current content.
+
+**Option B — Focus-based silent etag refresh.** `window.addEventListener('focus', ...)` fires a lightweight GET to re-check the etag. If the etag advanced while away, show a yellow info banner: "The prompt was updated elsewhere. Saving now will overwrite." No automatic reset — user decides. Avoids the "I came back to my tab and my edits got blown away" footgun.
+
+Both hit the same `performSave(ifMatchOverride)` path. Conflicts stopped being confusing immediately.
+
+Incidental lesson: while iterating, my own `curl` tests to `/api/prompt` advanced the server etag and caused the user's UI to 409. Not a bug — the system working. But a reminder that tooling-that-mutates-state can bite the user's session if they're actively editing.
+
+#### Modal became nearly full-screen
+
+User wanted the prompt editor to take up the whole screen real estate. Removed the `.modal__header` title bar entirely. Added `.modal--tall`:
+
+```css
+.modal--tall {
+  max-width: 1100px;
+  height: calc(100vh - 24px);
+  max-height: none;
+}
+```
+
+Plus a tighter toolbar (10px padding vs 16px) and `.prompt-editor__body` with `flex: 1; min-height: 0; overflow-y: auto`. The editor body now fills all remaining vertical space. Save / Edit source / Close buttons moved into the toolbar as `.prompt-editor__btn`.
+
+#### Pipeline rewrite: single Anthropic call, not per-image
+
+Original design (two-pass): Pass A called Anthropic once per image in parallel (`p-limit(6)`), Pass B called once more with all the CSV + per-image summaries for batch-level reconciliation. Rationale at the time: image analysis parallelizes well, batch reconciliation needs the full context.
+
+Problem in reality: Pass A has no global view. Each image call gets *one* image and the full CSV, so when Claude sees "image labeled Alice" but can't see the rest of the images, it can't reason about things like "this design's customer name doesn't match anything in the CSV" without false-flagging cases that *do* match (because the match exists on an image it can't see).
+
+Fix: collapse to a single call with **all images + the full CSV** in one user message. Model has global visibility. Findings became dramatically more accurate for the failure mode user was hitting (false "missing" flags).
+
+Cost implication: single call is cheaper than N+1 calls for the same content (no per-call overhead, better cache reuse via `cache_control: ephemeral` on the CSV block). Latency worse in theory (no parallelism) but in practice the model handled 30–40 images in a single 30–90s call, comparable to the old two-pass total.
+
+The single-call rewrite also deleted the reconciliation step's runtime role — Claude now does reconciliation itself. `api/_lib/reconcile.js` is still in the tree (still exported, still tested) but not imported by `run-qa.js`. Could be removed in a future cleanup pass if we commit to this design.
+
+The flaky "parallel pass A" wall-clock test (previously flagged) is obsoleted by this rewrite. Gone.
+
+#### The three-stack silent-failure fix
+
+After the pipeline rewrite, a 36-image batch returned "0 findings" with no visible error. Three separate bugs stacked:
+
+1. **`max_tokens: 8192` was too low.** A 36-image batch with findings for each easily blew past 8K output tokens. Claude hit the cap mid-JSON-output → SDK returned a truncated response with `stop_reason: 'max_tokens'` → our parser failed on malformed JSON → emitted `{kind: 'parse_error'}` to the stream.
+
+2. **Client had no branch for `parse_error`.** The stream event reducer accumulated findings but ignored error events. UI just showed an empty "Per-image findings" section when the stream ended. Looked identical to "no issues found."
+
+3. **`api/run-qa.js` didn't check `stop_reason`.** Even if parsing had succeeded, a truncated response should be surfaced as a run error, not a successful empty result.
+
+All three fixed together:
+- `MAX_TOKENS = 32000` initially, then user pointed out Opus 4.7 supports 128K sync → bumped to `128000`.
+- `run-qa.js` checks `res.stop_reason === 'max_tokens'` and emits `{kind: 'error', subkind: 'truncated', message: 'Model output exceeded max_tokens ...'}`.
+- Snapshot now includes `runError: { kind, subkind, message, raw }` field. Both `RunView` (App.jsx) and the share page (`Run.jsx`) render a red `.run-error` panel at the top when present, with a `<details>` block for the raw first-4KB model output so the user can diagnose.
+- Stream reducer merges `error` / `parse_error` events into `run.runError` so they survive through to persistence and the share page.
+
+**Lesson**: silent empty-result failures are the worst UX. Any pipeline that "returns findings" needs an explicit distinguishable error state at every level — API response, stream event, UI, persisted snapshot. We had the error plumbed at the API layer but not at the UI or snapshot layers.
+
+#### Streaming API switch
+
+After bumping to 128K tokens, Anthropic's SDK rejected the call:
+
+```
+Streaming is required for operations that may take longer than 10 minutes.
+```
+
+Switched from `anthropic.messages.create({...})` to `anthropic.messages.stream({...}).finalMessage()`. Same return type (`Message`), but the SDK internally streams the response, which uncaps the 10-minute synchronous limit.
+
+Test update: the mock now routes both `messages.create` and `messages.stream` through a single `createMock` helper that returns an object with `.finalMessage()` resolving to the canned response. Existing tests kept working unchanged.
+
+#### `maxDuration = 800s` and Vercel Fluid Compute
+
+Default function `maxDuration` is 300s. To exceed it, the project must be on Vercel Fluid Compute (which our Hobby plan supports), and `vercel.json` must declare the function's `maxDuration`:
+
+```json
+"functions": {
+  "api/run-qa.js": { "maxDuration": 800 }
+}
+```
+
+800s is the current Fluid Compute ceiling for Hobby (higher on Pro). Picked for safety — a 40-image batch shouldn't take anywhere near this, but the streaming API plus huge output tokens means we'd rather have headroom than hit a timeout mid-generation.
+
+#### Client-side image resize (2000px max dimension)
+
+Anthropic rejects images > 2000px on either dimension when you send many in a single call. Fix: resize client-side before upload.
+
+Added `src/lib/resizeImage.js`:
+- `computeResizedDimensions(w, h, max=2000)` — pure math, returns `{ width, height, scaled }` with proportional scaling and integer pixel rounding. Easy to test (7 tests around edge cases: exactly-at-max, one dim over, rounding, tiny images).
+- `resizeImageIfNeeded(file)` — async wrapper: load into `Image`, check dimensions, skip non-images (CSV) and SVG (vector), skip if already ≤ max. Otherwise draw to canvas, `toBlob()` as JPEG 0.92 (PNG preserves transparency → 0.92 saves ~4× over PNG). Preserves `relativePath` / `webkitRelativePath` via `Object.defineProperty` on the new File. Graceful degradation: on decode error, return the original file and let Anthropic reject if it's genuinely unsupported.
+
+Wired into `beginQa` in App.jsx: runs before upload, progress phase `resizing`. No third-party deps — canvas API is native.
+
+Testing pattern worth remembering: jsdom doesn't decode images or produce canvas bitmaps, so tests stub `Image` (async constructor → `onload`), stub `URL.createObjectURL`, and spy-replace `document.createElement('canvas')` with a fake that has `getContext()` + `toBlob()`. See `src/lib/resizeImage.test.js`.
+
+#### Filter toggles: minor issues + clean images
+
+Two checkboxes at the top of the results page, both default **off** to surface what actually needs attention:
+
+- **Show minor issues** — filters out findings where `severity` matches `/minor/i`. When off, shows "({N} hidden)" next to the label. Applied to both per-image findings and batch-level findings.
+- **Show clean images** — hides images with `findings.length === 0 && !error`. When off, shows "({N} hidden)". Applied after the minor-issues filter, so an image whose only findings were minor becomes "clean" when `showMinor` is off and gets hidden too.
+
+Both live in `RunView` (App.jsx) and the share page (`Run.jsx`). Kept in sync by copy-paste, which is fine for now — the share page is <50 lines of different markup.
+
+General lesson on UX: when the model flags lots of stuff, the default view should be *just the things that need action*. Every "No issues found ✓" row is visual noise the user has to scroll past. Filters with sensible defaults beat "show everything and let the user figure it out".
+
+## Pending (next session)
+
+#### Magnifying-glass lightbox
+
+User wants each result image to have a magnifying-glass icon in the top-right corner. Click → full-screen lightbox with an X close button in the top-right. Apply to both `RunView` and the share page.
+
+Design sketch:
+- New `src/components/ImageLightbox.jsx` — overlay, centered img, Escape-to-close + backdrop-click-to-close + X button. Pure presentation, props `{ src, onClose }`.
+- Button positioned absolute in `.results__image` / `.run-page__image`. SVG icon inlined.
+- Shared state in the parent (RunView / Run.jsx): `const [lightboxSrc, setLightboxSrc] = useState(null)`.
+
+#### Share-page image sizing bug
+
+`src/pages/Run.jsx` uses its own CSS classes (`.run-page__image`) that don't match `RunView`'s `.results__image` sizing. On the share page, images render much larger than the live view. Fix: either rename Run.jsx's classes to reuse `.results__*`, or clone the same rules under the `.run-page__*` names. Probably reuse — there's no reason the two views should diverge.
+
+#### `api/prompt.js` fs path still untested in prod
+
+Flagged in the previous section. GET `/api/prompt` on a fresh deploy (before any prompt has been saved to blob) would exercise the `readFileSync('../src/defaultPrompt.md')` fallback. Still unverified on deployed Vercel.
+
+#### Reconciliation code is dead
+
+`api/_lib/reconcile.js` + its 13 tests aren't wired into anything since the single-call rewrite. Either delete (if we're committed to letting Claude reconcile) or re-integrate (if we want deterministic cross-check on top of Claude's output). Leaning delete — adds confusion otherwise.
+
+#### Bundle size
+
+Still ~1.38 MB. Code-split PromptEditor to trim ~800 KB off the initial load. Low-priority until someone complains about TTI.
