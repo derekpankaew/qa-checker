@@ -4,6 +4,7 @@ import { getPrompt } from './lib/promptApi.js'
 import { isImageFile } from './lib/isImageFile.js'
 import { readEntry } from './lib/folderTraversal.js'
 import { uploadFiles } from './lib/upload.js'
+import { resizeImageIfNeeded } from './lib/resizeImage.js'
 import { runQa } from './lib/runQa.js'
 import './App.css'
 
@@ -163,7 +164,7 @@ export default function App() {
     const jobId = makeJobId()
     setRun({
       jobId,
-      phase: 'uploading',
+      phase: 'resizing',
       statusCheck: null,
       perImage: [],
       batchFindings: [],
@@ -173,9 +174,17 @@ export default function App() {
       runError: null,
     })
     try {
+      // Anthropic caps each image at 2000px on any side for many-image
+      // requests. Resize locally before we upload.
+      const resizedImages = await Promise.all(
+        imageFiles.map((f) => resizeImageIfNeeded(f)),
+      )
+
+      setRun((r) => ({ ...r, phase: 'uploading' }))
+
       const [{ content: prompt }, imageUploads, csvUploads] = await Promise.all([
         getPrompt(),
-        uploadFiles({ jobId, kind: 'images', files: imageFiles }),
+        uploadFiles({ jobId, kind: 'images', files: resizedImages }),
         uploadFiles({ jobId, kind: 'csvs', files: csvFiles }),
       ])
 
@@ -358,6 +367,7 @@ function RunView({ run, onBack }) {
         <button onClick={onBack}>Back to Upload</button>
       </div>
       <p className="run-phase">
+        {run.phase === 'resizing' && 'Resizing images…'}
         {run.phase === 'uploading' && 'Uploading files…'}
         {run.phase === 'running' && 'Running QA checks…'}
         {run.phase === 'done' && 'Done.'}
